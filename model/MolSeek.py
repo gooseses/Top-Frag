@@ -19,8 +19,8 @@ class Transformer(nn.Module):
         self.pro_emb = nn.Embedding(args.pro_voc_len, args.dim, args.pad_idx)
         self.smi_emb = nn.Embedding(args.smi_voc_len, args.dim, args.pad_idx)
        
-        self.pro_pe = PositionalEncoding(args.dim, args.max_len, args.dropout)
-        self.smi_pe = PositionalEncoding(args.dim, args.max_len, args.dropout)
+        self.pro_pe = PositionalEncoding(args.dim, args.pro_max_len, args.dropout)
+        self.smi_pe = PositionalEncoding(args.dim, args.smi_max_len, args.dropout)
         self.layers = torch.nn.ModuleList()
         
         for layerid in range(args.num_layers):
@@ -35,7 +35,6 @@ class Transformer(nn.Module):
         self.to(args.device)
 
     def _reset_parameters(self) -> None:
-        # Initialize model parameters using Xavier uniform distribution.
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
