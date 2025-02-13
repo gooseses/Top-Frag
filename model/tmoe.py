@@ -120,7 +120,7 @@ class DecoderLayer(nn.Module):
         self.multihead_attention = nn.MultiheadAttention(d_model, nheads, dropout = kwargs['dropout'])
         
         # Feed-forward network with mixture-of-experts.
-        self.feed_forward = MOELayer(self.dim, dim_feedforward, kwargs["num_experts"], kwargs)
+        self.feed_forward = MoELayer(self.dim, dim_feedforward, kwargs["num_experts"], kwargs)
         
         # Layer normalization for attention and feed-forward layers.
         self.feed_forward_norm = nn.LayerNorm(d_model)
@@ -191,7 +191,7 @@ class EncoderLayer(nn.Module):
 
         # Self-attention and FNN layers.
         self.self_attention = nn.MultiheadAttention(d_model, nheads, dropout = kwargs["dropout"])
-        self.feed_forward = MOELayer(self.dim, dim_feedforward, kwargs["num_experts"], kwargs)
+        self.feed_forward = MoELayer(self.dim, dim_feedforward, kwargs["num_experts"], kwargs)
 
         # Layer normalization for attention and FNN.
         self.feed_forward_norm = nn.LayerNorm(d_model)
@@ -254,9 +254,9 @@ class EncoderLayer(nn.Module):
         
         
 "MOE Layer"
-class MOELayer(nn.Module):
+class MoELayer(nn.Module):
     def __init__(self, d_model: int, dim_feedforward:int, num_experts:int, kwargs):
-        super(MOELayer, self).__init__()
+        super(MoELayer, self).__init__()
 
         # Initialize a list of FNN experts.
         self.experts = nn.ModuleList([
@@ -353,3 +353,5 @@ class PositionalEncoding(nn.Module):
     def forward(self, x):
         x = x + self.pe
         return self.dropout(x)
+    
+    nn.Transformer
