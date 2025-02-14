@@ -9,10 +9,10 @@ from torch.nn.utils.rnn import pad_sequence
 from configs.ModelConfigs import ModelConfigs
 
 
-class Transformer(nn.Module):
+class TopFrag(nn.Module):
     
     def __init__(self, args: ModelConfigs):
-        super(Transformer, self).__init__()
+        super(TopFrag, self).__init__()
         
         self.args = args
         
@@ -54,7 +54,6 @@ class Transformer(nn.Module):
 
         causal_mask = torch.triu(torch.full((seq_len, seq_len), float('-inf')), diagonal=1)
 
-        all_gate_outs: List[Tensor] = []    
         all_gate_indices: List[Tensor] = []
         
         src = self.pro_emb(src)
@@ -68,9 +67,8 @@ class Transformer(nn.Module):
         
         for mod in self.layers:
             if self.training:
-                e_out, d_out, gate_outs, gate_indices = mod(e_out, d_out, src_mask, tgt_mask, causal_mask)
+                e_out, d_out, gate_indices = mod(e_out, d_out, src_mask, tgt_mask, causal_mask)
                 
-                all_gate_outs.append(gate_outs)
                 all_gate_indices.append(gate_indices)
             else:
                 e_out, d_out = mod(e_out, d_out, src_mask, tgt_mask, causal_mask)
@@ -83,7 +81,7 @@ class Transformer(nn.Module):
         out = F.log_softmax(out, dim=-1)
         
         if self.training:
-            return out, all_gate_outs, all_gate_indices
+            return out, all_gate_indices
 
         return out
 
@@ -100,22 +98,18 @@ class Block(nn.Module):
     def forward(self, src: Tensor, tgt: Tensor, src_mask: Tensor, tgt_mask: Tensor, causal_mask: Tensor) -> Tuple[Tensor, Tensor]:
         # Forward pass through encoder/decoder layers.
         if self.training and self.isMoE:
-            all_gate_outs: List[Tensor] = []    
             all_gate_indices: List[Tensor] = []
 
-            out1, gate_out1, gate_indices1 = self.encoder(src, src_mask)
-            out2, gate_out2, gate_indices2 = self.decoder(out1, tgt, src_mask, tgt_mask, causal_mask)
+            out1, gate_indices1 = self.encoder(src, src_mask)
+            out2, gate_indices2 = self.decoder(out1, tgt, src_mask, tgt_mask, causal_mask)
             
-            all_gate_outs.append(gate_out1)
-            all_gate_indices.append(gate_indices1)
-            all_gate_outs.append(gate_out2)
-            all_gate_indices.append(gate_indices2)
+            all_gate_indices.append((gate_indices1, gate_indices2))
         else:
             out1 = self.encoder(src)
             out2 = self.decoder(out1, tgt)
 
         if self.training:
-            return out1, out2, all_gate_outs, all_gate_indices
+            return out1, out2, all_gate_indices
 
         return out1, out2
 
@@ -136,14 +130,14 @@ class EncoderBlock(nn.Module):
         x = x + self.attention(x, x, x, key_padding_mask=src_mask)[0]
 
         if self.isMoE:
-            out, gate_out, gate_indices = self.feed_forward(self.norm2(x))
+            out, gate_indices = self.feed_forward(self.norm2(x))
         else:
             out = self.feed_forward(self.norm2(x))
 
         x = x + out
         
         if self.training and self.isMoE:
-            return x, gate_out, gate_indices
+            return x, gate_indices
         return x
 
 
@@ -168,14 +162,14 @@ class DecoderBlock(nn.Module):
         x = x + self.multi_attention(x, mem, mem, key_padding_mask=src_mask)[0]
 
         if self.isMoE:
-            out, gate_out, gate_indices = self.feed_forward(self.norm3(x))
+            out, gate_indices = self.feed_forward(self.norm3(x))
         else:
             out = self.feed_forward(self.norm3(x))
 
         x = x + out
        
-        if self.training:
-            return x, gate_out, gate_indices
+        if self.training and self.isMoE:
+            return x, gate_indices
         return x
 
 
@@ -234,7 +228,7 @@ class MoELayer(nn.Module):
             idx, top = torch.where(indices == i)
             y[idx] += expert(x[idx]) * weights[idx, top, None]
         z = self.shared_experts(x)
-        return (y + z).view(shape), weights, indices
+        return (y + z).view(shape), indices
 
 
 class FeedForward(nn.Module):

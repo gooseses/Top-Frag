@@ -1,184 +1,133 @@
-import sys
-sys.path.append('.')
 import torch
-from easydict import EasyDict 
-import json
-from util.baseline import prepareFolder
-from util.data import getPretrainData, getPretrainDataFromCache, getVoc, getVocFromCache
-from model.tmoe import TMOE
-from model.Lmser_Transformer import MFT
+from configs.ModelConfigs import ModelConfigs
+from configs.TrainConfigs import TrainConfigs
+from data.util import get_dataloaders
+from model.MolSeek import TopFrag
 from loguru import logger
-from tqdm import tqdm
+from tqdm import tqdm_gui
 from torch import nn
-import torch.nn.functional as F
-import time
-import pandas as pd
+import argparse
 
-pretrain_location = "/teamspace/studios/this_studio/Deepest-Adjuvants/experiments/pretrain2024-09-05_04-51-59/model/0.pt"
-pretrain = True
+def calculate_maxvio(expert_counts):
+    avg_count = expert_counts.float().mean()
+    min_violation = torch.min(expert_counts.float()) / avg_count
+    max_violation = torch.max(expert_counts.float()) / avg_count
+    return [min_violation.item(), max_violation.item()]
 
-def train(model, trainLoader, smiVoc, device):
+def train(model: TopFrag, train_loader, configs: ModelConfigs, train_settings: TrainConfigs, optimizer):
     model.train()
-    batch = len(trainLoader)
-    totalLoss = 0.0
-    totalAcc = 0.0
-    
-    # Iterate over the training data.
-    for protein, smile, label, proMask, smiMask in tqdm(trainLoader):
-        protein = torch.as_tensor(protein).to(device)
-        smile = torch.as_tensor(smile).to(device)
-        proMask = torch.as_tensor(proMask).to(device)
-        smiMask = torch.as_tensor(smiMask).to(device)
-        label = torch.as_tensor(label, dtype=torch.long).to(device)
 
-        # Target mask for transformer.
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(smile.shape[1]).tolist()
-        tgt_mask = [tgt_mask] * 1
-        tgt_mask = torch.as_tensor(tgt_mask).to(device)
-        
-        # Forward pass through the model.
-        out,_ = model(protein, smile, smiMask, proMask, tgt_mask)
-        
-        # Calculate accuracy.
-        cacc = ((torch.eq(torch.argmax(out, dim=-1) * smiMask, label * smiMask).sum() - (smiMask.shape[0] * smiMask.shape[1] - (smiMask).sum())) / (smiMask).sum().float()).item()
-        totalAcc += cacc
-        
-        # Calculate loss, ignoring padding token. 
-        loss = F.nll_loss(out.permute(0, 2, 1), label, ignore_index=smiVoc.index('^')) # mask padding
-        totalLoss += loss.item()
+    total_correct = 0
+    total_samples = 0
+    total_loss = 0.0
+
+    for pro, label in tqdm_gui(train_loader):
+        out, gate_idx = model(pro, label[:, :-1])
+
+        # Compute Loss
+        loss = nn.functional.nll_loss(out, label[:, 1:], ignore_index=configs.pad_idx)
+        total_loss += loss.item()
+
+        # Compute Accuracy
+        preds = torch.argmax(out, dim=-1)  # Get most probable class
+        mask = (label != configs.pad_idx)  # Ignore padding indices
+        correct = torch.sum((preds == label) & mask)  # Count correct predictions
+        total_correct += correct.item()
+        total_samples += torch.sum(mask).item()  # Only count non-padding tokens
 
         # Backpropagation
         optimizer.zero_grad()
         loss.backward()
-        logger.info(f"Train Loss: {loss.item()}")
-        logger.info(f"Train Acc: {cacc}")
         optimizer.step()
 
+        # Update Expert Biases
+        for i, layer in enumerate(model.layers):
+            if not layer.isMoe:
+                continue
+            e_expert_counts = torch.bincount(gate_idx[i][0], minlength=configs.num_experts)
+            d_expert_counts = torch.bincount(gate_idx[i][1], minlength=configs.num_experts)
 
-    # Calculate average loss and accuracy.
-    avgLoss = round(totalLoss / batch, 3)
-    avgAcc = round(totalAcc / batch, 3)
+            avg_e_count = e_expert_counts.float().mean()
+            avg_d_count = d_expert_counts.float().mean()
 
-    return [avgAcc, avgLoss]
+            for j, count in enumerate(e_expert_counts):
+                error = avg_e_count - count.float()
+                layer.encoder.feed_forward.gate.expert_bias[j] += train_settings.update_rate * torch.sign(error).detach()
 
+            for k, count in enumerate(d_expert_counts):
+                error = avg_d_count - count.float()
+                layer.decoder.feed_forward.gate.expert_bias[k] += train_settings.update_rate * torch.sign(error).detach()
+
+    accuracy = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
+    avg_loss = total_loss / len(train_loader)
+    return accuracy, avg_loss
+
+def valid(model: TopFrag, valid_loader, configs: ModelConfigs):
+    model.eval()
+
+    total_correct = 0
+    total_samples = 0
+    total_loss = 0.0
+
+    for pro, label in tqdm_gui(valid_loader):
+        out, = model(pro, label[:-1])
+
+        # Compute Loss
+        loss = nn.functional.nll_loss(out, label, ignore_index=configs.pad_idx)
+        total_loss += loss.item()
+
+        # Compute Accuracy
+        preds = torch.argmax(out, dim=-1)  # Get most probable class
+        mask = (label != configs.pad_idx)  # Ignore padding indices
+        correct = torch.sum((preds == label) & mask)  # Count correct predictions
+        total_correct += correct.item()
+        total_samples += torch.sum(mask).item()  # Only count non-padding tokens
+
+    accuracy = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
+    avg_loss = total_loss / len(valid_loader)
+    return accuracy, avg_loss
 
 @torch.no_grad()
-def valid(model, validLoader, smiVoc, device):
-    model.eval()
-    
-    batch = len(validLoader)
-    totalLoss = 0
-    totalAcc = 0
-    # Iterate over the validation data.
-    for protein, smile, label, proMask, smiMask in tqdm(validLoader):
-        protein = torch.as_tensor(protein).to(device)
-        smile = torch.as_tensor(smile).to(device)
-        proMask = torch.as_tensor(proMask).to(device)
-        smiMask = torch.as_tensor(smiMask).to(device)
-        label = torch.as_tensor(label, dtype= torch.long).to(device)
-        
-        # Generate target mask for transformer.
-        tgt_mask = nn.Transformer.generate_square_subsequent_mask(smile.shape[1]).tolist()
-        tgt_mask = [tgt_mask] * 1
-        tgt_mask = torch.as_tensor(tgt_mask).to(device)
-        # Forward pass through the model.
-        out, _ = model(protein, smile, smiMask, proMask, tgt_mask)
-        
-        # Calculate accuracy.
-        cacc = ((torch.eq(torch.argmax(out, dim=-1) * smiMask, label * smiMask).sum() - (smiMask.shape[0] * smiMask.shape[1] - (smiMask).sum())) / (smiMask).sum().float()).item()
-        totalAcc += cacc
+def calculate_metrics(expert_counts, avg_count):
+    min_violation = torch.min(expert_counts.float()) / avg_count
+    max_violation = torch.max(expert_counts.float()) / avg_count
+    return min_violation.item(), max_violation.item()
 
-        # Calculate loss. 
-        loss = F.nll_loss(out.permute(0, 2, 1), label, ignore_index=smiVoc.index('^')) # mask padding
-        totalLoss += loss.item()
-
-        logger.info(f"Valid Loss: {loss.item()}")
-        logger.info(f"Valid Acc: {cacc}")
-        
-    #Calculate average loss and accuracy.
-    avgLoss = round(totalLoss / batch, 3)
-    avgAcc = round(totalAcc / batch, 3)
-
-    return [avgAcc, avgLoss]
-    
-
-
-         
 if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--pretrain', default=False, type=bool)
+    parser.add_argument('--useCache', default=True, type=bool)
 
-    with open('/teamspace/studios/this_studio/Deepest-Adjuvants/configs/model_config.json') as f: 
-        configs = json.load(f)
+    args = parser.parse_args()
+
+    configs = ModelConfigs()
+    train_settings = TrainConfigs()
+
+    model = TopFrag(configs)
+
+    if(args.pretrain):
+        state_dict = torch.load(f'{PRETRAIN}')
+        model.load_state_dict(state_dict)
     
-    with open('/teamspace/studios/this_studio/Deepest-Adjuvants/configs/train_settings.json') as f:
-        trainsettings = json.load(f)
-        
-    trainsettings = EasyDict(trainsettings)
-    configs = EasyDict(configs)
+    trainloader, validloader = get_dataloaders(train_settings, args.useCache)
 
-    model_folder, vis_folder, log_folder = prepareFolder("pretrain")
-    
-    with open(model_folder+'/model_settings.json', 'w') as f:
-        json.dump(configs, f)
+    optimizer = torch.optim.Adam(model.parameters(), lr=train_settings.lr)
+    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=0.99, last_epoch=-1)
 
-    with open(model_folder+'/training_settings.json', 'w') as f:
-        json.dump(trainsettings, f)
+    # Training loop for 1000 epochs
+    for epoch in range(train_settings.epochs):
+        logger.info(f"Epoch: {epoch}")
 
-    device = configs['device']
-    
-    batchsize = trainsettings.batchsize
-    
-    vocab = getVocFromCache()
-    # try:
-    trainloader, validloader = getPretrainDataFromCache(trainsettings) # change to getPretrain_datafromCache if already used
-    # except:
-    # trainloader, validloader = getPretrainData(trainsettings, vocab) # change to getPretrain_datafromCache if already used
-    # Intialize the model.
-    model = TMOE(vocab,  **configs).to(device)
+        # Train
+        train_accuracy, train_loss = train(model, trainloader, configs, train_settings, optimizer)
+        logger.info(f"Training Accuracy: {train_accuracy:.2f}% | Loss: {train_loss:.4f}")
 
-    state_dict = torch.load(pretrain_location)
+        # Validation
+        valid_accuracy, valid_loss = valid(model, validloader, configs, train_settings)
+        logger.info(f"Validation Accuracy: {valid_accuracy:.2f}% | Loss: {valid_loss:.4f}")
 
-    model.load_state_dict(state_dict)
+        # Save Model Checkpoint
+        torch.save(model.state_dict(), f'{MODEL}/epoch_{epoch}.pt')
 
-
-    # model = torch.nn.DataParallel(model, device_ids=[0])
-    # Load pretrained model if specified.
-    # if pretrain:
-    # for key in state_dict.keys():
-    #     print(key
-    # Initalize optimizer and learning rate scheduler.
-    optimizer = torch.optim.Adam(model.parameters(), lr = trainsettings.lr)
-    scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma = .99, last_epoch= -1)
-    
-    epoch_times = []
-    avg_epoch_time = 0.0
-
-    # Initalize log dataframe with training and validation metrics.
-    propertys = ['accuracy', 'loss',]
-    prefixs = ['training', 'validation']
-    columns = [' '.join([pre, pro]) for pre in prefixs for pro in propertys]
-    logdf = pd.DataFrame({}, columns=columns)
-     
-    # Training loop for 1000 epochs.
-    for i in range(trainsettings.epochs):
-                
-
-        logger.info("Epoch: {}".format(i))
-       
-        # Train model and log results.
-        d1 = train(model, trainloader, vocab.smiVoc, device)
-        logger.info(f"Train Loss: {d1[1]}")
-        logger.info(f"Train Acc: {d1[0]}")
-        
-        # Validate the model and log results.
-        d2 = valid(model, validloader, vocab.smiVoc, device)
-        
-        # Save the model checkpoint.
-        torch.save(model.state_dict(), model_folder+'/{}.pt'.format(i))
-        
-        # Add the traing/validation results to the log dataframe and save to CSV.
-        logdf = logdf._append(pd.DataFrame([d1+d2], columns=columns), ignore_index=True)
-        logdf.to_csv(log_folder+'/logdata.csv')
-        
-        # Step the learning rate scheduler.
+        # Step scheduler
         scheduler.step()
-    

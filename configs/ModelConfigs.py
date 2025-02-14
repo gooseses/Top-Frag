@@ -19,4 +19,4 @@ class ModelConfigs:
         self.nheads = 8
         self.dim_feedforward = 3072
         self.moe_feedforward = 3072/2
-    
+        self.pad_idx = 1515   
