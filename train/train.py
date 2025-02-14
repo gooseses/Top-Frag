@@ -24,23 +24,19 @@ def train(model: TopFrag, train_loader, configs: ModelConfigs, train_settings: T
     for pro, label in tqdm_gui(train_loader):
         out, gate_idx = model(pro, label[:, :-1])
 
-        # Compute Loss
         loss = nn.functional.nll_loss(out, label[:, 1:], ignore_index=configs.pad_idx)
         total_loss += loss.item()
 
-        # Compute Accuracy
-        preds = torch.argmax(out, dim=-1)  # Get most probable class
-        mask = (label != configs.pad_idx)  # Ignore padding indices
-        correct = torch.sum((preds == label) & mask)  # Count correct predictions
+        preds = torch.argmax(out, dim=-1)  
+        mask = (label != configs.pad_idx)  
+        correct = torch.sum((preds == label) & mask)  
         total_correct += correct.item()
-        total_samples += torch.sum(mask).item()  # Only count non-padding tokens
+        total_samples += torch.sum(mask).item()  
 
-        # Backpropagation
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
 
-        # Update Expert Biases
         for i, layer in enumerate(model.layers):
             if not layer.isMoe:
                 continue
@@ -72,16 +68,14 @@ def valid(model: TopFrag, valid_loader, configs: ModelConfigs):
     for pro, label in tqdm_gui(valid_loader):
         out, = model(pro, label[:-1])
 
-        # Compute Loss
         loss = nn.functional.nll_loss(out, label, ignore_index=configs.pad_idx)
         total_loss += loss.item()
 
-        # Compute Accuracy
-        preds = torch.argmax(out, dim=-1)  # Get most probable class
-        mask = (label != configs.pad_idx)  # Ignore padding indices
-        correct = torch.sum((preds == label) & mask)  # Count correct predictions
+        preds = torch.argmax(out, dim=-1)
+        mask = (label != configs.pad_idx) 
+        correct = torch.sum((preds == label) & mask)
         total_correct += correct.item()
-        total_samples += torch.sum(mask).item()  # Only count non-padding tokens
+        total_samples += torch.sum(mask).item()  
 
     accuracy = 100.0 * total_correct / total_samples if total_samples > 0 else 0.0
     avg_loss = total_loss / len(valid_loader)
@@ -118,16 +112,12 @@ if __name__ == '__main__':
     for epoch in range(train_settings.epochs):
         logger.info(f"Epoch: {epoch}")
 
-        # Train
         train_accuracy, train_loss = train(model, trainloader, configs, train_settings, optimizer)
         logger.info(f"Training Accuracy: {train_accuracy:.2f}% | Loss: {train_loss:.4f}")
 
-        # Validation
         valid_accuracy, valid_loss = valid(model, validloader, configs, train_settings)
         logger.info(f"Validation Accuracy: {valid_accuracy:.2f}% | Loss: {valid_loss:.4f}")
 
-        # Save Model Checkpoint
         torch.save(model.state_dict(), f'{MODEL}/epoch_{epoch}.pt')
 
-        # Step scheduler
         scheduler.step()
