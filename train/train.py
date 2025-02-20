@@ -14,7 +14,7 @@ def calculate_maxvio(expert_counts):
     max_violation = torch.max(expert_counts.float()) / avg_count
     return [min_violation.item(), max_violation.item()]
 
-def train(model: TopFrag, train_loader, configs: ModelConfigs, train_settings: TrainConfigs, optimizer):
+def train(model: TopFrag, train_loader, configs: ModelConfigs, train_settings: TrainConfigs):
     model.train()
 
     total_correct = 0
@@ -22,6 +22,7 @@ def train(model: TopFrag, train_loader, configs: ModelConfigs, train_settings: T
     total_loss = 0.0
 
     for pro, label in tqdm_gui(train_loader):
+        
         out, gate_idx = model(pro, label[:, :-1])
 
         loss = nn.functional.nll_loss(out, label[:, 1:], ignore_index=configs.pad_idx)

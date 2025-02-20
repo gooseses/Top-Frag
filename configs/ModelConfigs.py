@@ -13,8 +13,6 @@ class ModelConfigs:
         self.smi_max_len = 128
         self.pro_max_len = 128
         self.batch_size = 32
-        self.lr = 1e-4
-        self.epochs = 10
         self.dim = 768
         self.nheads = 8
         self.dim_feedforward = 3072
