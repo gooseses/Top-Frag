@@ -2,7 +2,7 @@ import torch
 import math
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.types import Tensor
+from torch import Tensor
 from typing import List, Tuple, Optional
 
 from torch.nn.utils.rnn import pad_sequence
@@ -16,11 +16,11 @@ class TopFrag(nn.Module):
         
         self.args = args
         
-        self.pro_emb = nn.Embedding(args.pro_voc_len, args.dim, args.pad_idx)
-        self.smi_emb = nn.Embedding(args.smi_voc_len, args.dim, args.pad_idx)
+        self.pro_emb = nn.Embedding(args.voc.pro_voc_len, args.dim, args.voc.pro_pad_idx)
+        self.smi_emb = nn.Embedding(args.voc.smi_voc_len, args.dim, args.voc.smi_pad_idx)
        
-        self.pro_pe = PositionalEncoding(args.dim, args.pro_max_len, args.dropout)
-        self.smi_pe = PositionalEncoding(args.dim, args.smi_max_len, args.dropout)
+        self.pro_pe = PositionalEncoding(args.dim, args.voc.pro_max_len, args.dropout)
+        self.smi_pe = PositionalEncoding(args.dim, args.voc.smi_max_len, args.dropout)
         self.layers = torch.nn.ModuleList()
         
         for layerid in range(args.num_layers):
@@ -28,11 +28,11 @@ class TopFrag(nn.Module):
         
         self.d_norm = nn.RMSNorm(args.dim)
         
-        self.linear = nn.Linear(args.dim, self.smi_voc_len)
+        self.linear = nn.Linear(args.dim, args.voc.smi_voc_len)
 
         self._reset_parameters()
 
-        self.to(args.device)
+        # self.to(args.device)
 
     def _reset_parameters(self) -> None:
         for p in self.parameters():
@@ -90,8 +90,8 @@ class Block(nn.Module):
     def __init__(self, args: ModelConfigs, id: int):
         super(Block, self).__init__()
 
-        self.encoder = EncoderBlock(args, id)
-        self.decoder = DecoderBlock(args, id)
+        self.encoder = EncoderBlock(id, args)
+        self.decoder = DecoderBlock(id, args)
 
         self.isMoE = id > args.num_dense_layers
 
@@ -120,9 +120,11 @@ class EncoderBlock(nn.Module):
         super(EncoderBlock, self).__init__()
         
         self.attention = nn.MultiheadAttention(args.dim, args.nheads, dropout=args.dropout)
-        self.feed_forward = FeedForward(args.dim, args.dim_feedforward, args) if id < args.num_dense_layers else MoELayer(args)
+        self.feed_forward = FeedForward(args.dim, args.dim_feedforward) if id < args.num_dense_layers else MoELayer(args)
         self.norm1 = nn.RMSNorm(args.dim) 
         self.norm2 = nn.RMSNorm(args.dim)
+        self.dropout = nn.Dropout(p=args.dropout)
+        
         self.isMoE = id > args.num_dense_layers
         
     def forward(self, x: Tensor, src_mask: Tensor) -> Tuple[Tensor, Optional[Tensor], Optional[Tensor]]:
@@ -136,6 +138,8 @@ class EncoderBlock(nn.Module):
 
         x = x + out
         
+        x = self.dropout(x)
+        
         if self.training and self.isMoE:
             return x, gate_indices
         return x
@@ -148,10 +152,11 @@ class DecoderBlock(nn.Module):
         
         self.self_attention = nn.MultiheadAttention(args.dim, args.nheads, dropout=args.dropout)
         self.multi_attention = nn.MultiheadAttention(args.dim, args.nheads, dropout=args.dropout)
-        self.feed_forward = FeedForward(args.dim, args.dim_feedforward, args) if id < args.num_dense_layers else MoELayer(args)
+        self.feed_forward = FeedForward(args.dim, args.dim_feedforward) if id < args.num_dense_layers else MoELayer(args)
         self.norm1 = nn.RMSNorm(args.dim) 
         self.norm2 = nn.RMSNorm(args.dim)
         self.norm3 = nn.RMSNorm(args.dim)
+        self.dropout = nn.Dropout(p=args.dropout)
         
         self.isMoE = id > args.num_dense_layers
         
@@ -167,6 +172,8 @@ class DecoderBlock(nn.Module):
             out = self.feed_forward(self.norm3(x))
 
         x = x + out
+        
+        x = self.dropout(x)
        
         if self.training and self.isMoE:
             return x, gate_indices
@@ -211,7 +218,7 @@ class MoELayer(nn.Module):
         ])
 
         self.dim = args.dim
-        self.shared_experts = FeedForward(args.dim, args.moe_feedforward * args.shared_experts)
+        self.shared_experts = FeedForward(args.dim, args.moe_dim_feedforward * args.shared_experts)
         
         self.gate = Gate(args)
         
